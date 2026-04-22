@@ -1,8 +1,11 @@
 {
   "name": "presentation-assistant-backend",
-  "version": "1.0.0",
-  "description": "Backend proxy for Gemini Live API",
+  "version": "1.1.0",
+  "description": "Backend proxy for Gemini Live API with debug",
   "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "start": "node server.js"
   },
