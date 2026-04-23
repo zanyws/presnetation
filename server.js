@@ -45,7 +45,7 @@ app.post('/api/summary', async (req, res) => {
     }
 });
 
-// 2. WebSocket 伺服器
+// 2. WebSocket 伺服器 - 簡化版本
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
@@ -57,65 +57,59 @@ wss.on('connection', (clientWs) => {
         return;
     }
 
-    const geminiWsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
+    // 使用更穩定的模型
+    const stableModel = 'models/gemini-2.0-flash-exp';
+    console.log(`使用穩定模型: ${stableModel}`);
+
+    const geminiWsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
     const geminiWs = new WebSocket(geminiWsUrl);
 
-    let isGeminiReady = false;
-    let setupCompleteReceived = false;
-    const messageQueue = [];
-
-    // 🔥 終極偵錯：攔截 Google 拒絕連線的真實原因
-    geminiWs.on('unexpected-response', (req, res) => {
-        let errorData = '';
-        res.on('data', chunk => { errorData += chunk; });
-        res.on('end', () => {
-            console.error(`[連線被拒] Google API HTTP ${res.statusCode}:`, errorData);
-            if (clientWs.readyState === WebSocket.OPEN) {
-                // 將 Google 的錯誤訊息包裝送回給前端
-                clientWs.send(JSON.stringify({
-                    serverError: `Google 伺服器拒絕連線 (HTTP ${res.statusCode})。\n設定的模型：${GEMINI_MODEL_NAME}\n官方錯誤訊息：${errorData}`
-                }));
-                // 延遲關閉，確保前端能收到訊息
-                setTimeout(() => clientWs.close(1008, "Google API Rejected"), 500);
-            }
-        });
-    });
+    let isConnected = false;
 
     geminiWs.on('open', () => {
         console.log('已成功連上 Gemini Live API');
+        isConnected = true;
 
-        // 發送初始化配置訊息
+        // 發送簡單的初始化訊息
         const setupMessage = {
             setup: {
-                model: GEMINI_MODEL_NAME,
+                model: stableModel,
                 generationConfig: {
                     responseModalities: ["TEXT"]
                 },
                 systemInstruction: {
-                    parts: [{ text: "你是一個即時聽寫與翻譯助理。請仔細聆聽使用者的語音（可能是粵語或普通話）。每次使用者說完一段話停頓時，請你嚴格按照以下格式輸出：\n[原音逐字稿]\n|||\n[規範現代漢語翻譯]\n\n請務必使用 ||| 作為分隔符。絕對不要有任何問候語、解釋或其他廢話。" }]
+                    parts: [{ text: "你是一個即時聽寫與翻譯助理。請仔細聆聽使用者的語音。每次使用者說完一段話時，請輸出：[原音逐字稿]|||[規範現代漢語翻譯]" }]
                 }
             }
         };
-        geminiWs.send(JSON.stringify(setupMessage));
+
+        try {
+            geminiWs.send(JSON.stringify(setupMessage));
+            console.log('已發送初始化訊息');
+        } catch (e) {
+            console.error('發送初始化訊息失敗:', e);
+            clientWs.close(1011, "初始化失敗");
+        }
     });
 
     geminiWs.on('message', (data) => {
-        const response = JSON.parse(data.toString());
+        try {
+            const response = JSON.parse(data.toString());
+            console.log('收到 Gemini 訊息:', Object.keys(response));
 
-        if (response.setupComplete) {
-            console.log('Gemini setup complete, ready to receive messages');
-            setupCompleteReceived = true;
-            isGeminiReady = true;
-            while(messageQueue.length > 0) {
-                geminiWs.send(messageQueue.shift());
+            if (response.setupComplete) {
+                console.log('Gemini 初始化完成');
+            } else if (clientWs.readyState === WebSocket.OPEN) {
+                clientWs.send(data.toString());
             }
-        } else if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(data.toString());
+        } catch (e) {
+            console.error('解析 Gemini 訊息失敗:', e);
         }
     });
 
     geminiWs.on('close', (code, reason) => {
         console.log(`Gemini WS 關閉 - Code: ${code}, Reason: ${reason}`);
+        isConnected = false;
         if (clientWs.readyState === WebSocket.OPEN) {
             clientWs.close(code, reason.toString());
         }
@@ -123,25 +117,30 @@ wss.on('connection', (clientWs) => {
 
     geminiWs.on('error', (err) => {
         console.error('Gemini WS 發生錯誤:', err);
+        isConnected = false;
     });
 
     clientWs.on('message', (data) => {
-        try {
-            let msgStr = data.toString();
-            let msgObj = JSON.parse(msgStr);
+        if (!isConnected) {
+            console.log('Gemini 未連線，忽略訊息');
+            return;
+        }
 
-            // 轉換前端訊息格式為 Gemini Live API 格式
+        try {
+            const msgStr = data.toString();
+            const msgObj = JSON.parse(msgStr);
+
+            // 忽略前端的 setup 訊息
             if (msgObj.setup) {
-                // 前端發送的 setup 訊息已被我們在 geminiWs.on('open') 中處理
-                // 這裡可以忽略或處理其他配置
+                console.log('忽略前端 setup 訊息');
                 return;
             }
 
+            // 轉換音訊格式
             if (msgObj.realtimeInput && msgObj.realtimeInput.mediaChunks) {
-                // 轉換 mediaChunks 為 audio 格式
                 const chunk = msgObj.realtimeInput.mediaChunks[0];
                 if (chunk) {
-                    msgObj = {
+                    const convertedMsg = {
                         realtimeInput: {
                             audio: {
                                 data: chunk.data,
@@ -149,36 +148,32 @@ wss.on('connection', (clientWs) => {
                             }
                         }
                     };
-                    msgStr = JSON.stringify(msgObj);
+                    geminiWs.send(JSON.stringify(convertedMsg));
+                    return;
                 }
             }
 
-            if (msgObj.clientContent && msgObj.clientContent.turnComplete) {
-                // 轉發 turnComplete 訊息
-                msgStr = JSON.stringify(msgObj);
-            }
-
-            if (setupCompleteReceived) {
-                if (isGeminiReady) {
-                    geminiWs.send(msgStr);
-                } else {
-                    messageQueue.push(msgStr);
-                }
-            } else {
-                // 如果 setup 還沒完成，排隊等候
-                messageQueue.push(msgStr);
-            }
+            // 轉發其他訊息
+            geminiWs.send(msgStr);
         } catch (e) {
-            console.error('處理客戶端訊息時發生錯誤:', e);
-            if (isGeminiReady) geminiWs.send(data);
-            else messageQueue.push(data);
+            console.error('處理客戶端訊息失敗:', e);
         }
     });
 
     clientWs.on('close', () => {
         console.log('前端客戶端已斷線');
-        if (geminiWs.readyState === WebSocket.OPEN) geminiWs.close();
+        if (geminiWs.readyState === WebSocket.OPEN) {
+            geminiWs.close();
+        }
     });
+
+    // 5秒後如果還沒連上就關閉
+    setTimeout(() => {
+        if (!isConnected && clientWs.readyState === WebSocket.OPEN) {
+            console.log('連線逾時，關閉客戶端連線');
+            clientWs.close(1008, "連線逾時");
+        }
+    }, 5000);
 });
 
 server.listen(PORT, () => {
