@@ -82,11 +82,15 @@ async function findAvailableLiveModel(apiKey) {
     const liveModels = [
         'models/gemini-2.5-flash-live-preview-0924',
         'models/gemini-3.1-flash-live-preview',
-        'models/gemini-2.5-flash-native-audio-preview-12-2025'
+        'models/gemini-2.5-flash-native-audio-preview-12-2025',
+        'models/gemini-2.5-flash-live-preview-09-2025'
     ];
+
+    console.log('開始檢查支援 Live API 的模型...');
 
     for (const model of liveModels) {
         try {
+            console.log(`測試模型: ${model}`);
             const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model.replace('models/', '')}:generateContent?key=${apiKey}`;
             const testResponse = await fetch(testUrl, {
                 method: 'POST',
@@ -97,16 +101,19 @@ async function findAvailableLiveModel(apiKey) {
             });
 
             if (testResponse.ok) {
-                console.log(`找到可用的 Live API 模型: ${model}`);
+                console.log(`✅ 找到可用的 Live API 模型: ${model}`);
                 return model;
+            } else {
+                const errorData = await testResponse.json();
+                console.log(`❌ 模型 ${model} 不可用:`, errorData.error?.message);
             }
         } catch (e) {
-            console.log(`測試模型 ${model} 失敗:`, e.message);
+            console.log(`❌ 測試模型 ${model} 失敗:`, e.message);
         }
     }
 
-    console.log('沒有找到可用的 Live API 模型，使用備用模型');
-    return 'models/gemini-2.0-flash-exp'; // 備用
+    console.log('❌ 沒有找到任何支援 Live API 的模型');
+    return null; // 不使用備用模型，直接返回 null
 }
 
 wss.on('connection', async (clientWs) => {
@@ -119,6 +126,17 @@ wss.on('connection', async (clientWs) => {
 
     // 找到可用的 Live API 模型
     const selectedModel = await findAvailableLiveModel(GEMINI_API_KEY);
+
+    if (!selectedModel) {
+        console.log('沒有支援 Live API 的模型可用，關閉連線');
+        const errorMsg = "您的 API 金鑰沒有權限使用 Gemini Live API，或 Live API 在您所在的地區不可用。請檢查 API 金鑰權限或考慮使用其他語音處理方案。";
+        clientWs.send(JSON.stringify({
+            serverError: errorMsg
+        }));
+        setTimeout(() => clientWs.close(1008, errorMsg), 500);
+        return;
+    }
+
     console.log(`使用模型: ${selectedModel}`);
 
     const geminiWsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
