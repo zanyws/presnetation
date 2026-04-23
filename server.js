@@ -15,11 +15,12 @@ if (!GEMINI_API_KEY) {
     console.error("警告：未設定 GEMINI_API_KEY 環境變數！");
 }
 
-// 1. REST API 端點
+// 1. REST API 端點 - 用於摘要功能
 app.post('/api/summary', async (req, res) => {
     try {
         const { prompt } = req.body;
-        const modelId = GEMINI_MODEL_NAME.replace('models/', '');
+        // 使用支援 generateContent 的穩定模型
+        const modelId = 'gemini-2.0-flash-exp';
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${GEMINI_API_KEY}`;
 
         const payload = {
@@ -45,21 +46,80 @@ app.post('/api/summary', async (req, res) => {
     }
 });
 
-// 2. WebSocket 伺服器 - 簡化版本
+// 測試端點：檢查支援 Live API 的模型
+app.get('/api/models', async (req, res) => {
+    try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`;
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error?.message || '無法獲取模型列表');
+        }
+
+        const liveModels = data.models.filter(model =>
+            model.supportedGenerationMethods &&
+            model.supportedGenerationMethods.includes('bidiGenerateContent')
+        );
+
+        res.json({
+            liveModels: liveModels.map(m => m.name),
+            allModels: data.models.map(m => ({
+                name: m.name,
+                methods: m.supportedGenerationMethods || []
+            }))
+        });
+    } catch (error) {
+        console.error('檢查模型失敗:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-wss.on('connection', (clientWs) => {
-    console.log(`[新連線] 準備代理至模型: ${GEMINI_MODEL_NAME}`);
+// 輔助函數：檢查模型是否可用
+async function findAvailableLiveModel(apiKey) {
+    const liveModels = [
+        'models/gemini-2.5-flash-live-preview-0924',
+        'models/gemini-3.1-flash-live-preview',
+        'models/gemini-2.5-flash-native-audio-preview-12-2025'
+    ];
+
+    for (const model of liveModels) {
+        try {
+            const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model.replace('models/', '')}:generateContent?key=${apiKey}`;
+            const testResponse = await fetch(testUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: "test" }] }]
+                })
+            });
+
+            if (testResponse.ok) {
+                console.log(`找到可用的 Live API 模型: ${model}`);
+                return model;
+            }
+        } catch (e) {
+            console.log(`測試模型 ${model} 失敗:`, e.message);
+        }
+    }
+
+    console.log('沒有找到可用的 Live API 模型，使用備用模型');
+    return 'models/gemini-2.0-flash-exp'; // 備用
+}
+
+wss.on('connection', async (clientWs) => {
+    console.log(`[新連線] 準備代理至模型`);
 
     if (!GEMINI_API_KEY) {
         clientWs.close(1011, "後端未設定 API Key");
         return;
     }
 
-    // 使用更穩定的模型
-    const stableModel = 'models/gemini-2.0-flash-exp';
-    console.log(`使用穩定模型: ${stableModel}`);
+    // 找到可用的 Live API 模型
+    const selectedModel = await findAvailableLiveModel(GEMINI_API_KEY);
+    console.log(`使用模型: ${selectedModel}`);
 
     const geminiWsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
     const geminiWs = new WebSocket(geminiWsUrl);
@@ -73,7 +133,7 @@ wss.on('connection', (clientWs) => {
         // 發送簡單的初始化訊息
         const setupMessage = {
             setup: {
-                model: stableModel,
+                model: selectedModel,
                 generationConfig: {
                     responseModalities: ["TEXT"]
                 },
