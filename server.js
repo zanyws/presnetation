@@ -61,6 +61,7 @@ wss.on('connection', (clientWs) => {
     const geminiWs = new WebSocket(geminiWsUrl);
 
     let isGeminiReady = false;
+    let setupCompleteReceived = false;
     const messageQueue = [];
 
     // 🔥 終極偵錯：攔截 Google 拒絕連線的真實原因
@@ -82,27 +83,33 @@ wss.on('connection', (clientWs) => {
 
     geminiWs.on('open', () => {
         console.log('已成功連上 Gemini Live API');
-        isGeminiReady = true;
 
         // 發送初始化配置訊息
-        const configMessage = {
-            config: {
+        const setupMessage = {
+            setup: {
                 model: GEMINI_MODEL_NAME,
-                responseModalities: ["TEXT"],
+                generationConfig: {
+                    responseModalities: ["TEXT"]
+                },
                 systemInstruction: {
                     parts: [{ text: "你是一個即時聽寫與翻譯助理。請仔細聆聽使用者的語音（可能是粵語或普通話）。每次使用者說完一段話停頓時，請你嚴格按照以下格式輸出：\n[原音逐字稿]\n|||\n[規範現代漢語翻譯]\n\n請務必使用 ||| 作為分隔符。絕對不要有任何問候語、解釋或其他廢話。" }]
                 }
             }
         };
-        geminiWs.send(JSON.stringify(configMessage));
-
-        while(messageQueue.length > 0) {
-            geminiWs.send(messageQueue.shift());
-        }
+        geminiWs.send(JSON.stringify(setupMessage));
     });
 
     geminiWs.on('message', (data) => {
-        if (clientWs.readyState === WebSocket.OPEN) {
+        const response = JSON.parse(data.toString());
+
+        if (response.setupComplete) {
+            console.log('Gemini setup complete, ready to receive messages');
+            setupCompleteReceived = true;
+            isGeminiReady = true;
+            while(messageQueue.length > 0) {
+                geminiWs.send(messageQueue.shift());
+            }
+        } else if (clientWs.readyState === WebSocket.OPEN) {
             clientWs.send(data.toString());
         }
     });
@@ -151,9 +158,14 @@ wss.on('connection', (clientWs) => {
                 msgStr = JSON.stringify(msgObj);
             }
 
-            if (isGeminiReady) {
-                geminiWs.send(msgStr);
+            if (setupCompleteReceived) {
+                if (isGeminiReady) {
+                    geminiWs.send(msgStr);
+                } else {
+                    messageQueue.push(msgStr);
+                }
             } else {
+                // 如果 setup 還沒完成，排隊等候
                 messageQueue.push(msgStr);
             }
         } catch (e) {
