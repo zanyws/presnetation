@@ -83,6 +83,19 @@ wss.on('connection', (clientWs) => {
     geminiWs.on('open', () => {
         console.log('已成功連上 Gemini Live API');
         isGeminiReady = true;
+
+        // 發送初始化配置訊息
+        const configMessage = {
+            config: {
+                model: GEMINI_MODEL_NAME,
+                responseModalities: ["TEXT"],
+                systemInstruction: {
+                    parts: [{ text: "你是一個即時聽寫與翻譯助理。請仔細聆聽使用者的語音（可能是粵語或普通話）。每次使用者說完一段話停頓時，請你嚴格按照以下格式輸出：\n[原音逐字稿]\n|||\n[規範現代漢語翻譯]\n\n請務必使用 ||| 作為分隔符。絕對不要有任何問候語、解釋或其他廢話。" }]
+                }
+            }
+        };
+        geminiWs.send(JSON.stringify(configMessage));
+
         while(messageQueue.length > 0) {
             geminiWs.send(messageQueue.shift());
         }
@@ -110,8 +123,31 @@ wss.on('connection', (clientWs) => {
             let msgStr = data.toString();
             let msgObj = JSON.parse(msgStr);
 
+            // 轉換前端訊息格式為 Gemini Live API 格式
             if (msgObj.setup) {
-                msgObj.setup.model = GEMINI_MODEL_NAME;
+                // 前端發送的 setup 訊息已被我們在 geminiWs.on('open') 中處理
+                // 這裡可以忽略或處理其他配置
+                return;
+            }
+
+            if (msgObj.realtimeInput && msgObj.realtimeInput.mediaChunks) {
+                // 轉換 mediaChunks 為 audio 格式
+                const chunk = msgObj.realtimeInput.mediaChunks[0];
+                if (chunk) {
+                    msgObj = {
+                        realtimeInput: {
+                            audio: {
+                                data: chunk.data,
+                                mimeType: chunk.mimeType
+                            }
+                        }
+                    };
+                    msgStr = JSON.stringify(msgObj);
+                }
+            }
+
+            if (msgObj.clientContent && msgObj.clientContent.turnComplete) {
+                // 轉發 turnComplete 訊息
                 msgStr = JSON.stringify(msgObj);
             }
 
@@ -121,6 +157,7 @@ wss.on('connection', (clientWs) => {
                 messageQueue.push(msgStr);
             }
         } catch (e) {
+            console.error('處理客戶端訊息時發生錯誤:', e);
             if (isGeminiReady) geminiWs.send(data);
             else messageQueue.push(data);
         }
